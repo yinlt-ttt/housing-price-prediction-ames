@@ -1,0 +1,668 @@
+---
+title: "Econ 491 - Ames Housing: Variable Preprocessing & OLS Benchmark Model"
+author: 'Housing 4 (Part 1: Yuxin Li, Part 2: Yafei Luo, Part 3: Zixuan Zhang, Part 4:
+  Lintong Yin)'
+date: "2026-03-04"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: '2'
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r load-libraries}
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(tidyr)
+```
+
+```{r load-data}
+train <- read_csv("train.csv")
+```
+
+---
+
+# Global Cleaning
+
+```{r global-cleaning}
+# Drop columns where more than 90% are NA
+train <- train[, colMeans(is.na(train)) < 0.9]
+
+# Drop low-value or redundant variables identified across all parts
+train <- train %>%
+  select(-Street, -Utilities, -Condition2) %>%
+  mutate(LandSlope_binary = ifelse(LandSlope == "Gtl", 0, 1)) %>%
+  select(-LandSlope)
+
+train <- train %>%
+  select(-MSSubClass, -LotFrontage)
+
+drop_vars <- c("RoofMatl", "Heating", "ExterCond", "BsmtCond",
+               "Exterior2nd", "BsmtFinSF1", "BsmtUnfSF", "BsmtFinSF2", "BsmtFinType2")
+train <- train %>% select(-all_of(intersect(drop_vars, names(train))))
+
+vars_to_drop <- c("CentralAir", "Electrical", "Functional",
+                  "LowQualFinSF", "KitchenAbvGr", "BsmtHalfBath")
+train <- train %>% select(-all_of(intersect(vars_to_drop, names(train))))
+
+drop_vars2 <- c("Fence", "GarageQual", "GarageCond", "3SsnPorch",
+                "PoolArea", "MiscVal", "ScreenPorch", "PoolQC", "MiscFeature")
+train <- train %>% select(-all_of(intersect(drop_vars2, names(train))))
+```
+
+---
+
+# Part 1: Variables 1–20
+
+## MSZoning
+
+MSZoning determines land use and neighborhood density, which affects desirability and demand and may lead to price differences.
+
+With five categories, we create four dummy variables and leave one as the reference group (C(all)), because MSZoning is a nominal variable with no clear ordinal ranking or dominant category, so each type should be allowed to have its own separate effect relative to a baseline group.
+
+```{r mszoning}
+pos <- which(names(train) == "MSZoning")
+msz_dummies <- data.frame(
+  MSZoning_FV = ifelse(train$MSZoning == "FV", 1, 0),
+  MSZoning_RH = ifelse(train$MSZoning == "RH", 1, 0),
+  MSZoning_RL = ifelse(train$MSZoning == "RL", 1, 0),
+  MSZoning_RM = ifelse(train$MSZoning == "RM", 1, 0)
+)
+train <- cbind(
+  train[, 1:(pos-1), drop = FALSE],
+  msz_dummies,
+  train[, (pos+1):ncol(train), drop = FALSE]
+)
+```
+
+Each dummy variable represents whether a house belongs to a specific zoning category: for example, MSZoning_FV = 1 indicates the property is in the FV zone (and 0 otherwise). If all four dummy variables equal zero, the property belongs to the omitted reference category, C (all).
+
+## LotShape
+
+We converted LotShape from a multi-category variable (Reg, IR1, IR2, IR3) into a **binary** numeric indicator because the distribution shows that Reg accounts for most observations, while the irregular categories have relatively small sample sizes and their sale price distributions overlap substantially in the boxplot. We use a single dummy that captures the main economic distinction: regular vs. irregular lot shape.
+
+```{r lotshape}
+pos <- which(names(train) == "LotShape")
+lotshape_dummy <- data.frame(
+  LotShape_Reg = ifelse(train$LotShape == "Reg", 1, 0)
+)
+train <- cbind(
+  train[, 1:(pos-1), drop = FALSE],
+  lotshape_dummy,
+  train[, (pos+1):ncol(train), drop = FALSE]
+)
+```
+
+LotShape_Reg equals 1 if the lot shape is Regular (Reg), and equals 0 if the lot shape is irregular (IR1, IR2, IR3).
+
+## LandContour
+
+From a frequency table, Lvl accounts for the dominant category, while the other three categories (Bnk, HLS, Low) are relatively small. So we use a binary variable: 1 = Lvl (flat land); 0 = Non-level.
+
+```{r landcontour}
+pos <- which(names(train) == "LandContour")
+land_dummy <- data.frame(
+  LandContour_Lvl = ifelse(train$LandContour == "Lvl", 1, 0)
+)
+train <- cbind(
+  train[, 1:(pos-1), drop = FALSE],
+  land_dummy,
+  train[, (pos+1):ncol(train), drop = FALSE]
+)
+```
+
+## LotConfig
+
+LotConfig describes the positional configuration of a lot relative to surrounding streets, which may affect accessibility, traffic exposure, and privacy, and therefore influence housing prices. We convert LotConfig into a set of dummy variables because the categories represent different positional types rather than increasing levels of quality.
+
+```{r lotconfig}
+pos <- which(names(train) == "LotConfig")
+lotconfig_dummies <- data.frame(
+  LotConfig_Corner  = ifelse(train$LotConfig == "Corner", 1, 0),
+  LotConfig_CulDSac = ifelse(train$LotConfig == "CulDSac", 1, 0),
+  LotConfig_FR2     = ifelse(train$LotConfig == "FR2", 1, 0),
+  LotConfig_FR3     = ifelse(train$LotConfig == "FR3", 1, 0)
+)
+train <- cbind(
+  train[, 1:(pos-1), drop = FALSE],
+  lotconfig_dummies,
+  train[, (pos+1):ncol(train), drop = FALSE]
+)
+```
+
+Each dummy variable equals 1 if the property belongs to that specific lot configuration and 0 otherwise. If all four dummy variables equal zero, the property belongs to the reference category Inside, and the regression intercept captures the expected sale price for Inside lots.
+
+## Neighborhood
+
+Neighborhood describes the physical location of the property within **Ames** city limits. Given the large number of neighborhood categories and the clear price gradient observed in median sale prices, we group neighborhoods into three tiers (high-, medium-, and low-price areas) based on median price ranking. This approach reduces dimensionality while preserving the economic structure of location effects. Medium-price neighborhoods serve as the reference group.
+
+```{r neighborhood}
+pos <- which(names(train) == "Neighborhood")
+nbhd_rank <- aggregate(SalePrice ~ Neighborhood, data = train, FUN = median)
+nbhd_rank <- nbhd_rank[order(nbhd_rank$SalePrice), ]
+n <- nrow(nbhd_rank)
+low_set  <- nbhd_rank$Neighborhood[1:floor(n/3)]
+high_set <- nbhd_rank$Neighborhood[(ceiling(2*n/3)):n]
+nbhd_dummies <- data.frame(
+  Neighborhood_High = ifelse(train$Neighborhood %in% high_set, 1, 0),
+  Neighborhood_Low  = ifelse(train$Neighborhood %in% low_set,  1, 0)
+)
+train <- cbind(
+  train[, 1:(pos-1), drop = FALSE],
+  nbhd_dummies,
+  train[, (pos+1):ncol(train), drop = FALSE]
+)
+```
+
+Neighborhood_High equals 1 if the house is located in the top-third (high-price) neighborhoods based on median SalePrice, and 0 otherwise. Neighborhood_Low equals 1 if the house is in the bottom-third (low-price) neighborhoods, and 0 otherwise. When both dummies equal 0, the house belongs to the Medium (middle-third) tier, which is the reference group.
+
+## Condition1
+
+Condition1 describes the proximity of the property to various external conditions, such as major roads, railroads, or other positive/negative influences. Categories are grouped based on their economic interpretation: PosA and PosN represent proximity to **positive amenities**, while Artery, Feedr, and railroad-related categories reflect potential **negative externalities** such as noise or traffic. Norm serves as the **baseline condition**.
+
+```{r condition1}
+pos <- which(names(train) == "Condition1")
+positive_set <- c("PosA", "PosN")
+negative_set <- c("Artery", "Feedr", "RRAn", "RRAe", "RRNe", "RRn")
+condition_dummies <- data.frame(
+  Condition_Pos = ifelse(train$Condition1 %in% positive_set, 1, 0),
+  Condition_Neg = ifelse(train$Condition1 %in% negative_set, 1, 0)
+)
+train <- cbind(
+  train[, 1:(pos-1), drop = FALSE],
+  condition_dummies,
+  train[, (pos+1):ncol(train), drop = FALSE]
+)
+```
+
+Condition_Pos equals 1 if the property is located near a positive external feature (PosA or PosN), and 0 otherwise. Condition_Neg equals 1 if the property is located near a negative external influence (Artery, Feedr, or railroad-related categories), and 0 otherwise. If both equal 0, the property belongs to the reference category Norm.
+
+## BldgType
+
+BldgType describes the structural type of residential building, which may influence price due to differences in privacy, lot usage, and housing density. We convert BldgType into a set of dummy variables and use "1Fam" (single-family home) as the reference group.
+
+```{r bldgtype}
+pos <- which(names(train) == "BldgType")
+bldg_dummies <- data.frame(
+  BldgType_2fmCon = ifelse(train$BldgType == "2fmCon", 1, 0),
+  BldgType_Duplex = ifelse(train$BldgType == "Duplex", 1, 0),
+  BldgType_Twnhs  = ifelse(train$BldgType == "Twnhs", 1, 0),
+  BldgType_TwnhsE = ifelse(train$BldgType == "TwnhsE", 1, 0)
+)
+train <- cbind(
+  train[, 1:(pos-1), drop = FALSE],
+  bldg_dummies,
+  train[, (pos+1):ncol(train), drop = FALSE]
+)
+```
+
+Each dummy variable equals 1 if the property belongs to that building type and 0 otherwise. If all dummy variables equal 0, the property belongs to the reference category "1Fam," and the regression intercept represents the expected sale price for single-family homes.
+
+## HouseStyle
+
+HouseStyle describes the overall structural layout and number of stories of the dwelling, which affects total living space, vertical design, and therefore housing prices. Because price differences are largely driven by vertical size and architectural form, we group the categories into structurally similar types and use one-story homes as the reference group.
+
+```{r housestyle}
+pos <- which(names(train) == "HouseStyle")
+two_story_set <- c("2Story", "2.5Fin", "2.5Unf")
+onehalf_set   <- c("1.5Fin", "1.5Unf")
+split_set     <- c("SLvl", "SFoyer")
+housestyle_dummies <- data.frame(
+  HouseStyle_TwoStory = ifelse(train$HouseStyle %in% two_story_set, 1, 0),
+  HouseStyle_OneHalf  = ifelse(train$HouseStyle %in% onehalf_set, 1, 0),
+  HouseStyle_Split    = ifelse(train$HouseStyle %in% split_set, 1, 0)
+)
+train <- cbind(
+  train[, 1:(pos-1), drop = FALSE],
+  housestyle_dummies,
+  train[, (pos+1):ncol(train), drop = FALSE]
+)
+```
+
+HouseStyle_TwoStory equals 1 if the dwelling is a two-story structure (2Story, 2.5Fin, or 2.5Unf), and 0 otherwise. HouseStyle_OneHalf equals 1 if the dwelling is a 1.5-story structure (1.5Fin or 1.5Unf), and 0 otherwise. HouseStyle_Split equals 1 if the dwelling is a split-level or split-foyer structure (SLvl or SFoyer), and 0 otherwise. If all dummy variables equal 0, the property belongs to the reference category 1Story.
+
+## OverallQual & OverallCond
+
+Both are numeric variables and are kept as-is. OverallQual rates the overall material and finish quality of the house on a scale from 1 (Very Poor) to 10 (Very Excellent). OverallCond rates the overall condition of the house, reflecting wear and maintenance rather than design quality.
+
+## YearBuilt & YearRemodAdd → AgeBuilt & AgeRemod
+
+YearBuilt and YearRemodAdd record the calendar years of construction and remodeling. However, housing prices are more directly affected by the age of the property at the time of sale rather than the absolute calendar year. We therefore transform both into age variables.
+
+```{r age-vars}
+pos_built <- which(names(train) == "YearBuilt")
+AgeBuilt  <- train$YrSold - train$YearBuilt
+train <- cbind(
+  train[, 1:(pos_built-1), drop = FALSE],
+  AgeBuilt,
+  train[, (pos_built+1):ncol(train), drop = FALSE]
+)
+
+pos_remod <- which(names(train) == "YearRemodAdd")
+AgeRemod  <- train$YrSold - train$YearRemodAdd
+train <- cbind(
+  train[, 1:(pos_remod-1), drop = FALSE],
+  AgeRemod,
+  train[, (pos_remod+1):ncol(train), drop = FALSE]
+)
+```
+
+AgeBuilt measures how old the house is at the time of sale, computed as YrSold - YearBuilt. AgeRemod measures how long it has been since the last remodeling, computed as YrSold - YearRemodAdd. Higher values indicate older structures or longer time since renovation, which may negatively affect housing prices.
+
+---
+
+# Part 2: Variables 21–40
+
+## RoofStyle
+
+Because roof style is an unordered categorical variable with a severe class imbalance, and gable roofs are dominant in the sample, we employed dummy coding in our regression analysis. We designated gable roofs as the reference level because it represents the most common category. This approach allows the model to avoid the "dummy variable trap" (perfect multicollinearity) while estimating price differences for other roof styles relative to standard gable roofs.
+
+```{r roofstyle}
+train$RoofStyle <- as.factor(train$RoofStyle)
+train$RoofStyle <- relevel(train$RoofStyle, ref = "Gable")
+```
+
+## Exterior1st
+
+Exterior1st (primary exterior wall material) is an unordered categorical variable with 15 categories and a pronounced long-tail effect, meaning some materials appear very infrequently. Creating a dummy variable for every rare material in the OLS model would lead to significant model instability and large standard errors.
+
+Therefore, we use VinylSd as the baseline group, retaining the five materials with sufficient sample size: MetalSd, HdBoard, Wd Sdng, Plywood, and CemntBd, and classifying all remaining materials as "Other".
+
+```{r exterior1st}
+train <- train %>%
+  mutate(Exterior1st = recode(Exterior1st,
+                              "VinylSd" = "VinylSd",
+                              "MetalSd" = "MetalSd",
+                              "HdBoard" = "HdBoard",
+                              "Wd Sdng" = "Wd Sdng",
+                              "Plywood" = "Plywood",
+                              "CemntBd" = "CemntBd",
+                              .default  = "Other"))
+train$Exterior1st <- as.factor(train$Exterior1st)
+train$Exterior1st <- relevel(train$Exterior1st, ref = "VinylSd")
+```
+
+## MasVnrType
+
+The MasVnrType distribution plot shows a very small number of NAs; we merge these missing values into the None class. The sample size of BrkCmn is also very small and its median price is close to that of None, so we consider BrkCmn as a "non-mainstream/low-premium" finish and merge it with None. After these operations, None is the most numerous category (over 850), and we use it as the baseline group.
+
+```{r masvnrtype}
+train <- train %>%
+  mutate(MasVnrType = replace_na(MasVnrType, "None")) %>%
+  mutate(MasVnrType = recode(MasVnrType,
+                             "BrkFace" = "BrkFace",
+                             "Stone"   = "Stone",
+                             "None"    = "None",
+                             "BrkCmn"  = "None",
+                             .default  = "None"))
+train$MasVnrType <- as.factor(train$MasVnrType)
+train$MasVnrType <- relevel(train$MasVnrType, ref = "None")
+```
+
+## ExterQual
+
+For ExterQual (External Quality), since it is an ordinal variable, its levels are Ex (Excellent) > Gd (Good) > TA (Typical) > Fa (Fair) > Po (Poor), with a clear order of importance. We assign numeric values accordingly: Ex = 5, Gd = 4, TA = 3, Fa = 2, Po = 1.
+
+```{r exterqual}
+qual_map <- c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2, "Po" = 1)
+train$ExterQual <- qual_map[train$ExterQual]
+```
+
+## Foundation
+
+Foundation is an unordered categorical variable. We first merge the smaller categories — Slab, Stone, and Wood — into "Other" because their sample sizes are too small and would lead to model instability. We set PConc as the reference group because it has the largest sample size and typically represents newer houses, which is meaningful for economic interpretation.
+
+```{r foundation}
+train <- train %>%
+  mutate(Foundation = recode(Foundation,
+                             "PConc"  = "PConc",
+                             "CBlock" = "CBlock",
+                             "BrkTil" = "BrkTil",
+                             .default = "Other"))
+train$Foundation <- as.factor(train$Foundation)
+train$Foundation <- relevel(train$Foundation, ref = "PConc")
+```
+
+## BsmtQual
+
+For BsmtQual (Basement Quality), since it is an ordinal variable, its levels are Ex > Gd > TA > Fa > Po, with a clear order of importance. We assign: Ex = 5, Gd = 4, TA = 3, Fa = 2, Po = 1. NA usually represents "no basement" and is mapped to 0, because houses without basements naturally have the lowest quality and value.
+
+```{r bsmtqual}
+bsmt_qual_map <- c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2, "Po" = 1, "NA" = 0)
+train$BsmtQual[is.na(train$BsmtQual)] <- "NA"
+train$BsmtQual <- bsmt_qual_map[train$BsmtQual]
+```
+
+## BsmtExposure
+
+For BsmtExposure, since it is an ordinal variable, its levels are Gd (Good) > Av (Average) > Mn (Minimum) > No. We assign: Gd = 3, Av = 2, Mn = 1, No = 0. NA (no basement) is also assigned 0.
+
+```{r bsmtexposure}
+expo_map <- c("Gd" = 3, "Av" = 2, "Mn" = 1, "No" = 0, "NA" = 0)
+train$BsmtExposure[is.na(train$BsmtExposure)] <- "NA"
+train$BsmtExposure <- expo_map[train$BsmtExposure]
+```
+
+## BsmtFinType1
+
+BsmtFinType1 is an ordinal categorical variable classified from incomplete to high-standard completion: GLQ > ALQ > BLQ > Rec > LwQ > Unf. We assign: GLQ = 6, ALQ = 5, BLQ = 4, Rec = 3, LwQ = 2, Unf = 1. Missing values (NA = no basement) are mapped to 0.
+
+```{r bsmtfintype1}
+fin_map <- c("GLQ" = 6, "ALQ" = 5, "BLQ" = 4, "Rec" = 3, "LwQ" = 2, "Unf" = 1, "NA" = 0)
+train$BsmtFinType1[is.na(train$BsmtFinType1)] <- "NA"
+train$BsmtFinType1 <- fin_map[train$BsmtFinType1]
+```
+
+## HeatingQC
+
+For HeatingQC (Heating Quality), since it is an ordinal variable, its levels are Ex > Gd > TA > Fa > Po, with a clear order of importance. We assign: Ex = 5, Gd = 4, TA = 3, Fa = 2, Po = 1.
+
+```{r heatingqc}
+qual_map <- c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2, "Po" = 1)
+train$HeatingQC <- qual_map[train$HeatingQC]
+```
+
+---
+
+# Part 3: Variables 41–60
+
+We keep the response variable (SalePrice) and the explanatory variables assigned to our group. Note that R renames variables starting with numbers, so 1stFlrSF becomes X1stFlrSF, and 2ndFlrSF becomes X2ndFlrSF.
+
+There are three primary encoding operations in this section: ordinal encoding (ordered quality responses assigned numeric values), dummy encoding (nominal variables converted using factor), and missing imputation (categorical NAs replaced with "None"; continuous NAs filled with median).
+
+```{r part3-preprocessing}
+# Handle NAs for categorical variables
+colnames(train)[colnames(train) == "1stFlrSF"] <- "X1stFlrSF"
+colnames(train)[colnames(train) == "2ndFlrSF"] <- "X2ndFlrSF"
+
+train$FireplaceQu <- as.character(train$FireplaceQu)
+train$FireplaceQu[is.na(train$FireplaceQu)] <- "None"
+
+train$GarageType <- as.character(train$GarageType)
+train$GarageType[is.na(train$GarageType)] <- "None"
+
+train$GarageFinish <- as.character(train$GarageFinish)
+train$GarageFinish[is.na(train$GarageFinish)] <- "None"
+
+train$KitchenQual <- as.character(train$KitchenQual)
+train$KitchenQual[is.na(train$KitchenQual)] <- "None"
+
+# Ordinal encoding helper
+qual_map_fn <- function(x) {
+  ifelse(x == "Ex", 5,
+  ifelse(x == "Gd", 4,
+  ifelse(x == "TA", 3,
+  ifelse(x == "Fa", 2,
+  ifelse(x == "Po", 1, 0)))))
+}
+
+train$KitchenQual_num  <- qual_map_fn(train$KitchenQual)
+train$FireplaceQu_num  <- qual_map_fn(train$FireplaceQu)
+
+# GarageFinish ordinal encoding
+train$GarageFinish_num <- ifelse(train$GarageFinish == "Fin", 3,
+                          ifelse(train$GarageFinish == "RFn", 2,
+                          ifelse(train$GarageFinish == "Unf", 1, 0)))
+
+# Impute GarageYrBlt missing values with median
+train$GarageYrBlt[is.na(train$GarageYrBlt)] <- median(train$GarageYrBlt, na.rm = TRUE)
+
+# Convert GarageType to integer factor
+train$GarageType_num <- as.integer(factor(train$GarageType))
+
+# Drop original character columns
+train$KitchenQual  <- NULL
+train$FireplaceQu  <- NULL
+train$GarageFinish <- NULL
+train$GarageType   <- NULL
+```
+
+KitchenQual, FireplaceQu, and GarageFinish are ordinal variables representing quality; they were scored numerically based on their quality ranking (Ex = 5 through Po = 1, None = 0). GarageType was converted to an integer factor since it is categorical. NA values for GarageYrBlt were imputed with the median.
+
+---
+
+# Part 4: Variables 61–78
+
+Based on the graphical and correlation analyses from the EDA phase, this section converts each variable under my responsibility into numeric form in preparation for OLS regression. All encoding decisions are grounded in findings from the earlier exploratory analysis.
+
+## Additional Drops
+
+**GarageArea (dropped):** GarageArea and GarageCars are highly correlated (r = 0.88), capturing nearly identical structural information. GarageCars shows a slightly stronger correlation with log(SalePrice) (0.68 vs. 0.65) and offers a more interpretable unit, so GarageArea is dropped to avoid multicollinearity.
+
+**MoSold (dropped):** EDA boxplots show substantial overlap in price distributions across all 12 months with no clear seasonal trend. Including MoSold would add noise without improving prediction.
+
+**YrSold (dropped here after use in Part 1):** YrSold was already used by a teammate in Part 1 to construct AgeBuilt and AgeRemod, and is now removed.
+
+```{r part4-drops}
+train <- train %>% select(-GarageArea, -MoSold, -YrSold)
+```
+
+## GarageCars (Ordinal Encoding)
+
+The EDA boxplot shows a clear monotonic increase in log(SalePrice) from 0 to 3 garage spaces. Homes with 4-car garages show a slight price decline likely due to very few observations, so values of 4 and above are merged into category 3 to preserve the clean upward trend.
+
+```{r garagecars}
+train$GarageCars <- ifelse(train$GarageCars >= 4, 3, train$GarageCars)
+train$GarageCars[is.na(train$GarageCars)] <- 0
+```
+
+## PavedDrive (Ordinal Encoding)
+
+PavedDrive represents driveway paving condition with three ordered levels: not paved (N), partially paved (P), and fully paved (Y). This is a natural ordinal scale — the degree of paving increases from N to P to Y. The EDA boxplot confirms a corresponding upward pattern in log(SalePrice) across these levels.
+
+```{r paveddrive}
+paved_map <- c("N" = 0, "P" = 1, "Y" = 2)
+train$PavedDrive <- paved_map[train$PavedDrive]
+```
+
+## HasOutdoorSpace (Binary Encoding)
+
+The EDA scatter plot and histogram reveal that TotalOutdoorSF (= WoodDeckSF + OpenPorchSF + EnclosedPorch) has a weak continuous relationship with log(SalePrice) and is heavily concentrated at zero. The most meaningful distinction is simply whether a property has any outdoor space at all, so the three original columns are combined into one binary indicator.
+
+```{r outdoorspace}
+train$WoodDeckSF <- ifelse(
+  train$WoodDeckSF + train$OpenPorchSF + train$EnclosedPorch > 0, 1, 0
+)
+train <- train %>%
+  rename(HasOutdoorSpace = WoodDeckSF) %>%
+  select(-OpenPorchSF, -EnclosedPorch)
+```
+
+## SaleType & SaleCondition (Binary Encoding)
+
+**SaleType:** A nominal variable with 9 levels representing different transaction methods. Among them, "New" (new home first sale) is the most economically distinct, as new construction typically commands a price premium. All other types are grouped as 0.
+
+**SaleCondition:** Describes the circumstances of the sale (Normal, Abnormal, Partial, etc.). A binary indicator for normal sales captures the key distinction — whether the transaction occurred under standard market conditions — without introducing excessive dummy variables.
+
+```{r sale-vars}
+train$SaleType      <- ifelse(train$SaleType == "New", 1, 0)
+train$SaleCondition <- ifelse(train$SaleCondition == "Normal", 1, 0)
+```
+
+## Verification
+
+```{r verify-part4}
+my_vars <- c("GarageCars", "PavedDrive", "HasOutdoorSpace",
+             "SaleType", "SaleCondition")
+for (v in my_vars) {
+  cat(v, "- class:", class(train[[v]]),
+      "| unique values:", paste(sort(unique(train[[v]])), collapse = ", "), "\n")
+}
+```
+
+---
+
+# Final Check
+
+```{r final-check}
+cat("Total columns after preprocessing:", ncol(train), "\n")
+cat("Total rows:", nrow(train), "\n")
+glimpse(train)
+
+colnames(train)
+```
+
+---
+
+# Part 5: OLS Benchmark Model
+
+## Impute MasVnrArea NA
+
+```{r impute-masvnrarea}
+# MasVnrArea has a small number of NAs — impute with median to avoid dropped rows in lm()
+train$MasVnrArea[is.na(train$MasVnrArea)] <- median(train$MasVnrArea, na.rm = TRUE)
+```
+
+## 80/20 Train-Test Split
+
+The dataset is divided into an in-sample (80%) training set used to estimate coefficients, and an out-of-sample (20%) test set used for forecasting evaluation. `set.seed(123)` ensures the split is reproducible across all team members.
+
+```{r train-test-split}
+set.seed(123)  # ensures reproducibility
+
+n            <- nrow(train)
+train_index  <- sample(1:n, size = 0.8 * n)
+
+train_in  <- train[train_index, ]   # in-sample  (80%)
+test_out  <- train[-train_index, ]  # out-of-sample (20%)
+
+cat("In-sample rows:", nrow(train_in), "\n")
+cat("Out-of-sample rows:", nrow(test_out), "\n")
+```
+
+## OLS Regression
+
+We estimate the OLS model using only the in-sample data (`train_in`). The model regresses SalePrice on all preprocessed numeric and dummy variables across Parts 1–4. This serves as the benchmark model against which future improvements will be compared.
+
+```{r ols-model}
+model_simple <- lm(
+  SalePrice ~
+    MSZoning_FV + 
+    MSZoning_RH + 
+    MSZoning_RL + 
+    MSZoning_RM +
+    LotArea +
+    LotShape_Reg +
+    LandContour_Lvl +
+    LotConfig_Corner + 
+    LotConfig_CulDSac + 
+    LotConfig_FR2 + 
+    LotConfig_FR3 +
+    Neighborhood_High + 
+    Neighborhood_Low +
+    Condition_Pos + 
+    Condition_Neg +
+    BldgType_2fmCon + 
+    BldgType_Duplex + 
+    BldgType_Twnhs + 
+    BldgType_TwnhsE +
+    HouseStyle_TwoStory + 
+    HouseStyle_OneHalf + 
+    HouseStyle_Split +
+    OverallQual +
+    OverallCond +
+    AgeBuilt +
+    AgeRemod +
+    RoofStyle +
+    Exterior1st +
+    MasVnrType +
+    MasVnrArea +
+    ExterQual +
+    Foundation +
+    BsmtQual +
+    BsmtExposure +
+    BsmtFinType1 +
+    TotalBsmtSF +
+    HeatingQC +
+    X1stFlrSF +
+    X2ndFlrSF +
+    GrLivArea +
+    BsmtFullBath +
+    FullBath +
+    HalfBath +
+    BedroomAbvGr +
+    TotRmsAbvGrd +
+    Fireplaces +
+    GarageYrBlt +
+    GarageCars +
+    PavedDrive +
+    HasOutdoorSpace +
+    SaleType +
+    SaleCondition +
+    LandSlope_binary +
+    KitchenQual_num +
+    FireplaceQu_num +
+    GarageFinish_num +
+    GarageType_num,
+  data = train_in   # ← use in-sample only for estimation
+)
+
+summary(model_simple)
+```
+
+## Regression Results Table (stargazer)
+
+```{r stargazer-table, results='asis'}
+library(stargazer)
+
+stargazer(
+  model_simple,
+  type    = "html",
+  title   = "OLS Benchmark Model: Ames Housing Price",
+  dep.var.labels = "Sale Price (USD)",
+  omit.stat = c("f", "ser"),
+  digits  = 0,
+  no.space = TRUE
+)
+```
+
+## Forecast on Out-of-Sample Data
+
+Using the coefficients estimated on `train_in`, we generate predicted sale prices for the held-out `test_out` set. This "fake forecast" lets us evaluate how well the model generalizes to unseen data before making real predictions.
+
+```{r forecast}
+pred_out <- predict(model_simple, newdata = test_out)
+```
+
+## RMSE (Root Mean Squared Error)
+
+RMSE measures the average prediction error on the out-of-sample data. This value serves as the **benchmark** for all future model improvements — a lower RMSE in subsequent models indicates a genuine performance gain.
+
+```{r rmse}
+rmse <- sqrt(mean((test_out$SalePrice - pred_out)^2))
+cat("Out-of-sample RMSE:", round(rmse, 2), "\n")
+```
+
+## Predicted vs Actual Plot
+
+The scatter plot compares each house's predicted sale price against its actual sale price in the test set. Points falling along the red dashed diagonal line indicate perfect predictions. Systematic deviations reveal where the model over- or under-predicts.
+
+```{r pred-vs-actual-plot}
+library(ggplot2)
+
+plot_df <- data.frame(
+  Actual    = test_out$SalePrice,
+  Predicted = pred_out
+)
+
+ggplot(plot_df, aes(x = Actual, y = Predicted)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed", linewidth = 1) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title    = "OLS Benchmark: Predicted vs Actual Sale Price",
+    subtitle = paste0("Out-of-sample RMSE = $", format(round(rmse, 0), big.mark = ",")),
+    x        = "Actual Sale Price (USD)",
+    y        = "Predicted Sale Price (USD)"
+  ) +
+  theme_minimal(base_size = 13)
+```

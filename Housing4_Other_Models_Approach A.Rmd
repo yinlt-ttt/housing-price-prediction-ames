@@ -1,0 +1,563 @@
+---
+title: "Econ 491 - Ames Housing: Other Models"
+author: "Housing 4 (Part 1: Yuxin Li, Part 2: Yafei Luo, Part 3: Zixuan Zhang, Part 4: Lintong Yin)"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Data Preprocessing (Same as Benchmark)
+
+We reuse the exact same data cleaning and encoding pipeline from the benchmark model. This ensures all model comparisons are on equal footing.
+
+```{r load-and-clean}
+library(readr)
+library(dplyr)
+library(tidyverse)
+library(tidyr)
+library(glmnet)
+library(ggplot2)
+library(stargazer)
+
+train <- read_csv("train.csv")
+```
+
+## Global Cleaning
+
+```{r global-cleaning}
+# Drop columns where more than 90% are NA
+train <- train[, colMeans(is.na(train)) < 0.9]
+
+# Drop low-value or redundant variables identified across all parts
+train <- train %>%
+  select(-Street, -Utilities, -Condition2) %>%
+  mutate(LandSlope_binary = ifelse(LandSlope == "Gtl", 0, 1)) %>%
+  select(-LandSlope)
+
+train <- train %>%
+  select(-MSSubClass, -LotFrontage)
+
+drop_vars <- c("RoofMatl", "Heating", "ExterCond", "BsmtCond",
+               "Exterior2nd", "BsmtFinSF1", "BsmtUnfSF", "BsmtFinSF2", "BsmtFinType2")
+train <- train %>% select(-all_of(intersect(drop_vars, names(train))))
+
+vars_to_drop <- c("CentralAir", "Electrical", "Functional",
+                   "LowQualFinSF", "KitchenAbvGr", "BsmtHalfBath")
+train <- train %>% select(-all_of(intersect(vars_to_drop, names(train))))
+
+drop_vars2 <- c("Fence", "GarageQual", "GarageCond", "3SsnPorch",
+                 "PoolArea", "MiscVal", "ScreenPorch", "PoolQC", "MiscFeature")
+train <- train %>% select(-all_of(intersect(drop_vars2, names(train))))
+```
+
+## Part 1: Variables 1--20
+
+```{r part1-encoding}
+# MSZoning
+pos <- which(names(train) == "MSZoning")
+msz_dummies <- data.frame(
+  MSZoning_FV = ifelse(train$MSZoning == "FV", 1, 0),
+  MSZoning_RH = ifelse(train$MSZoning == "RH", 1, 0),
+  MSZoning_RL = ifelse(train$MSZoning == "RL", 1, 0),
+  MSZoning_RM = ifelse(train$MSZoning == "RM", 1, 0)
+)
+train <- cbind(train[, 1:(pos-1), drop = FALSE], msz_dummies,
+               train[, (pos+1):ncol(train), drop = FALSE])
+
+# LotShape
+pos <- which(names(train) == "LotShape")
+lotshape_dummy <- data.frame(LotShape_Reg = ifelse(train$LotShape == "Reg", 1, 0))
+train <- cbind(train[, 1:(pos-1), drop = FALSE], lotshape_dummy,
+               train[, (pos+1):ncol(train), drop = FALSE])
+
+# LandContour
+pos <- which(names(train) == "LandContour")
+land_dummy <- data.frame(LandContour_Lvl = ifelse(train$LandContour == "Lvl", 1, 0))
+train <- cbind(train[, 1:(pos-1), drop = FALSE], land_dummy,
+               train[, (pos+1):ncol(train), drop = FALSE])
+
+# LotConfig
+pos <- which(names(train) == "LotConfig")
+lotconfig_dummies <- data.frame(
+  LotConfig_Corner  = ifelse(train$LotConfig == "Corner", 1, 0),
+  LotConfig_CulDSac = ifelse(train$LotConfig == "CulDSac", 1, 0),
+  LotConfig_FR2     = ifelse(train$LotConfig == "FR2", 1, 0),
+  LotConfig_FR3     = ifelse(train$LotConfig == "FR3", 1, 0)
+)
+train <- cbind(train[, 1:(pos-1), drop = FALSE], lotconfig_dummies,
+               train[, (pos+1):ncol(train), drop = FALSE])
+
+# Neighborhood
+pos <- which(names(train) == "Neighborhood")
+nbhd_rank <- aggregate(SalePrice ~ Neighborhood, data = train, FUN = median)
+nbhd_rank <- nbhd_rank[order(nbhd_rank$SalePrice), ]
+n_nbhd <- nrow(nbhd_rank)
+low_set  <- nbhd_rank$Neighborhood[1:floor(n_nbhd/3)]
+high_set <- nbhd_rank$Neighborhood[(ceiling(2*n_nbhd/3)):n_nbhd]
+nbhd_dummies <- data.frame(
+  Neighborhood_High = ifelse(train$Neighborhood %in% high_set, 1, 0),
+  Neighborhood_Low  = ifelse(train$Neighborhood %in% low_set, 1, 0)
+)
+train <- cbind(train[, 1:(pos-1), drop = FALSE], nbhd_dummies,
+               train[, (pos+1):ncol(train), drop = FALSE])
+
+# Condition1
+pos <- which(names(train) == "Condition1")
+positive_set <- c("PosA", "PosN")
+negative_set <- c("Artery", "Feedr", "RRAn", "RRAe", "RRNe", "RRn")
+condition_dummies <- data.frame(
+  Condition_Pos = ifelse(train$Condition1 %in% positive_set, 1, 0),
+  Condition_Neg = ifelse(train$Condition1 %in% negative_set, 1, 0)
+)
+train <- cbind(train[, 1:(pos-1), drop = FALSE], condition_dummies,
+               train[, (pos+1):ncol(train), drop = FALSE])
+
+# BldgType
+pos <- which(names(train) == "BldgType")
+bldg_dummies <- data.frame(
+  BldgType_2fmCon = ifelse(train$BldgType == "2fmCon", 1, 0),
+  BldgType_Duplex = ifelse(train$BldgType == "Duplex", 1, 0),
+  BldgType_Twnhs  = ifelse(train$BldgType == "Twnhs", 1, 0),
+  BldgType_TwnhsE = ifelse(train$BldgType == "TwnhsE", 1, 0)
+)
+train <- cbind(train[, 1:(pos-1), drop = FALSE], bldg_dummies,
+               train[, (pos+1):ncol(train), drop = FALSE])
+
+# HouseStyle
+pos <- which(names(train) == "HouseStyle")
+two_story_set <- c("2Story", "2.5Fin", "2.5Unf")
+onehalf_set   <- c("1.5Fin", "1.5Unf")
+split_set     <- c("SLvl", "SFoyer")
+housestyle_dummies <- data.frame(
+  HouseStyle_TwoStory = ifelse(train$HouseStyle %in% two_story_set, 1, 0),
+  HouseStyle_OneHalf  = ifelse(train$HouseStyle %in% onehalf_set, 1, 0),
+  HouseStyle_Split    = ifelse(train$HouseStyle %in% split_set, 1, 0)
+)
+train <- cbind(train[, 1:(pos-1), drop = FALSE], housestyle_dummies,
+               train[, (pos+1):ncol(train), drop = FALSE])
+
+# OverallQual & OverallCond: kept as-is
+
+# YearBuilt & YearRemodAdd -> AgeBuilt & AgeRemod
+pos_built <- which(names(train) == "YearBuilt")
+AgeBuilt <- train$YrSold - train$YearBuilt
+train <- cbind(train[, 1:(pos_built-1), drop = FALSE], AgeBuilt,
+               train[, (pos_built+1):ncol(train), drop = FALSE])
+
+pos_remod <- which(names(train) == "YearRemodAdd")
+AgeRemod <- train$YrSold - train$YearRemodAdd
+train <- cbind(train[, 1:(pos_remod-1), drop = FALSE], AgeRemod,
+               train[, (pos_remod+1):ncol(train), drop = FALSE])
+```
+
+## Part 2: Variables 21--40
+
+```{r part2-encoding}
+# RoofStyle
+train$RoofStyle <- as.factor(train$RoofStyle)
+train$RoofStyle <- relevel(train$RoofStyle, ref = "Gable")
+
+# Exterior1st
+train <- train %>%
+  mutate(Exterior1st = recode(Exterior1st,
+    "VinylSd" = "VinylSd", "MetalSd" = "MetalSd", "HdBoard" = "HdBoard",
+    "Wd Sdng" = "Wd Sdng", "Plywood" = "Plywood", "CemntBd" = "CemntBd",
+    .default = "Other"))
+train$Exterior1st <- as.factor(train$Exterior1st)
+train$Exterior1st <- relevel(train$Exterior1st, ref = "VinylSd")
+
+# MasVnrType
+train <- train %>%
+  mutate(MasVnrType = replace_na(MasVnrType, "None")) %>%
+  mutate(MasVnrType = recode(MasVnrType,
+    "BrkFace" = "BrkFace", "Stone" = "Stone", "None" = "None",
+    "BrkCmn" = "None", .default = "None"))
+train$MasVnrType <- as.factor(train$MasVnrType)
+train$MasVnrType <- relevel(train$MasVnrType, ref = "None")
+
+# ExterQual
+qual_map <- c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2, "Po" = 1)
+train$ExterQual <- qual_map[train$ExterQual]
+
+# Foundation
+train <- train %>%
+  mutate(Foundation = recode(Foundation,
+    "PConc" = "PConc", "CBlock" = "CBlock", "BrkTil" = "BrkTil",
+    .default = "Other"))
+train$Foundation <- as.factor(train$Foundation)
+train$Foundation <- relevel(train$Foundation, ref = "PConc")
+
+# BsmtQual
+bsmt_qual_map <- c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2, "Po" = 1, "NA" = 0)
+train$BsmtQual[is.na(train$BsmtQual)] <- "NA"
+train$BsmtQual <- bsmt_qual_map[train$BsmtQual]
+
+# BsmtExposure
+expo_map <- c("Gd" = 3, "Av" = 2, "Mn" = 1, "No" = 0, "NA" = 0)
+train$BsmtExposure[is.na(train$BsmtExposure)] <- "NA"
+train$BsmtExposure <- expo_map[train$BsmtExposure]
+
+# BsmtFinType1
+fin_map <- c("GLQ" = 6, "ALQ" = 5, "BLQ" = 4, "Rec" = 3, "LwQ" = 2, "Unf" = 1, "NA" = 0)
+train$BsmtFinType1[is.na(train$BsmtFinType1)] <- "NA"
+train$BsmtFinType1 <- fin_map[train$BsmtFinType1]
+
+# HeatingQC
+qual_map <- c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2, "Po" = 1)
+train$HeatingQC <- qual_map[train$HeatingQC]
+```
+
+## Part 3: Variables 41--60
+
+```{r part3-encoding}
+colnames(train)[colnames(train) == "1stFlrSF"] <- "X1stFlrSF"
+colnames(train)[colnames(train) == "2ndFlrSF"] <- "X2ndFlrSF"
+
+train$FireplaceQu <- as.character(train$FireplaceQu)
+train$FireplaceQu[is.na(train$FireplaceQu)] <- "None"
+train$GarageType <- as.character(train$GarageType)
+train$GarageType[is.na(train$GarageType)] <- "None"
+train$GarageFinish <- as.character(train$GarageFinish)
+train$GarageFinish[is.na(train$GarageFinish)] <- "None"
+train$KitchenQual <- as.character(train$KitchenQual)
+train$KitchenQual[is.na(train$KitchenQual)] <- "None"
+
+qual_map_fn <- function(x) {
+  ifelse(x == "Ex", 5,
+  ifelse(x == "Gd", 4,
+  ifelse(x == "TA", 3,
+  ifelse(x == "Fa", 2,
+  ifelse(x == "Po", 1, 0)))))
+}
+
+train$KitchenQual_num  <- qual_map_fn(train$KitchenQual)
+train$FireplaceQu_num  <- qual_map_fn(train$FireplaceQu)
+
+train$GarageFinish_num <- ifelse(train$GarageFinish == "Fin", 3,
+                          ifelse(train$GarageFinish == "RFn", 2,
+                          ifelse(train$GarageFinish == "Unf", 1, 0)))
+
+train$GarageYrBlt[is.na(train$GarageYrBlt)] <- median(train$GarageYrBlt, na.rm = TRUE)
+train$GarageType_num <- as.integer(factor(train$GarageType))
+
+train$KitchenQual  <- NULL
+train$FireplaceQu  <- NULL
+train$GarageFinish <- NULL
+train$GarageType   <- NULL
+```
+
+## Part 4: Variables 61--78
+
+```{r part4-encoding}
+train <- train %>% select(-GarageArea, -MoSold, -YrSold)
+
+train$GarageCars <- ifelse(train$GarageCars >= 4, 3, train$GarageCars)
+train$GarageCars[is.na(train$GarageCars)] <- 0
+
+paved_map <- c("N" = 0, "P" = 1, "Y" = 2)
+train$PavedDrive <- paved_map[train$PavedDrive]
+
+train$WoodDeckSF <- ifelse(
+  train$WoodDeckSF + train$OpenPorchSF + train$EnclosedPorch > 0, 1, 0)
+train <- train %>%
+  rename(HasOutdoorSpace = WoodDeckSF) %>%
+  select(-OpenPorchSF, -EnclosedPorch)
+
+train$SaleType      <- ifelse(train$SaleType == "New", 1, 0)
+train$SaleCondition <- ifelse(train$SaleCondition == "Normal", 1, 0)
+```
+
+## Final Preparation & Train-Test Split
+
+```{r final-prep}
+train$MasVnrArea[is.na(train$MasVnrArea)] <- median(train$MasVnrArea, na.rm = TRUE)
+
+cat("Total columns after preprocessing:", ncol(train), "\n")
+cat("Total rows:", nrow(train), "\n")
+
+set.seed(123)
+n <- nrow(train)
+train_index <- sample(1:n, size = 0.8 * n)
+train_in  <- train[train_index, ]
+test_out  <- train[-train_index, ]
+
+# Remove Id
+train_in  <- train_in  %>% select(-Id)
+test_out  <- test_out  %>% select(-Id)
+
+cat("In-sample rows:", nrow(train_in), "\n")
+cat("Out-of-sample rows:", nrow(test_out), "\n")
+```
+
+## Benchmark RMSE (Model 1)
+
+```{r benchmark-rmse}
+model_benchmark <- lm(SalePrice ~ ., data = train_in)
+pred_benchmark  <- predict(model_benchmark, newdata = test_out)
+rmse_benchmark  <- sqrt(mean((test_out$SalePrice - pred_benchmark)^2))
+cat("Model 1 (Benchmark) RMSE:", round(rmse_benchmark, 2), "\n")
+```
+
+
+# Prepare Matrix Format for LASSO
+
+`glmnet` requires numeric matrix input. `model.matrix()` automatically expands the 4 remaining factor columns (RoofStyle, Exterior1st, MasVnrType, Foundation) into dummy variables.
+
+```{r matrix-prep}
+# Ensure factor levels are consistent between train and test
+for (col in names(train_in)) {
+  if (is.factor(train_in[[col]])) {
+    test_out[[col]] <- factor(test_out[[col]], levels = levels(train_in[[col]]))
+  }
+}
+
+X_train <- model.matrix(SalePrice ~ ., data = train_in)[, -1]
+y_train <- train_in$SalePrice
+
+X_test  <- model.matrix(SalePrice ~ ., data = test_out)[, -1]
+y_test  <- test_out$SalePrice
+
+cat("Number of variables after dummy expansion:", ncol(X_train), "\n")
+```
+
+
+# Model 2: LASSO Variable Selection + OLS
+
+LASSO (Least Absolute Shrinkage and Selection Operator) adds an L1 penalty to the OLS loss function, shrinking unimportant coefficients to exactly zero. We use cross-validation to select the optimal penalty parameter $\lambda$, then use the selected variables to re-estimate an OLS model for unbiased coefficients.
+
+```{r model2-lasso}
+set.seed(123)
+cv_lasso <- cv.glmnet(X_train, y_train, alpha = 1)
+
+plot(cv_lasso, main = "LASSO: Cross-Validation Error vs Lambda")
+```
+
+```{r model2-lambda}
+cat("lambda.min:", cv_lasso$lambda.min, "\n")
+cat("lambda.1se:", cv_lasso$lambda.1se, "\n")
+```
+
+## LASSO Selected Variables
+
+We use `lambda.1se` for a more parsimonious model.
+
+```{r model2-vars}
+lasso_coef <- coef(cv_lasso, s = "lambda.1se")
+lasso_vars <- rownames(lasso_coef)[which(lasso_coef != 0)]
+lasso_vars <- lasso_vars[lasso_vars != "(Intercept)"]
+cat("LASSO selected", length(lasso_vars), "variables:\n")
+print(lasso_vars)
+```
+
+## OLS with LASSO-Selected Variables
+
+```{r model2-ols}
+formula_lasso <- as.formula(paste("SalePrice ~", paste(lasso_vars, collapse = " + ")))
+model_lasso   <- lm(formula_lasso, data = train_in)
+```
+
+## Model 2 RMSE & Diagnostics
+
+```{r model2-rmse}
+pred_lasso <- predict(model_lasso, newdata = test_out)
+rmse_lasso <- sqrt(mean((y_test - pred_lasso)^2))
+cat("Model 2 (LASSO + OLS) RMSE:", round(rmse_lasso, 2), "\n")
+```
+
+```{r model2-stargazer, results='asis'}
+stargazer(model_lasso, type = "latex",
+          title = "Model 2: LASSO Selection + OLS",
+          dep.var.labels = "Sale Price (USD)",
+          omit.stat = c("f", "ser"), digits = 0, no.space = TRUE,
+          header = FALSE)
+```
+
+```{r model2-plot}
+ggplot(data.frame(Actual = y_test, Predicted = pred_lasso),
+       aes(x = Actual, y = Predicted)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, color = "red",
+              linetype = "dashed", linewidth = 1) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Model 2 (LASSO + OLS): Predicted vs Actual",
+       subtitle = paste0("RMSE = $", format(round(rmse_lasso, 0), big.mark = ",")),
+       x = "Actual Sale Price (USD)",
+       y = "Predicted Sale Price (USD)") +
+  theme_minimal(base_size = 13)
+```
+
+
+# Model 3: Log(SalePrice) + LASSO Selection + OLS
+
+Following Wang (2025) and standard hedonic pricing literature, we apply a log transformation to SalePrice. This addresses the right-skewed distribution of housing prices and allows coefficients to be interpreted as approximate percentage effects.
+
+```{r model3-lasso}
+y_train_log <- log(y_train)
+
+set.seed(123)
+cv_lasso_log <- cv.glmnet(X_train, y_train_log, alpha = 1)
+plot(cv_lasso_log, main = "Log Model LASSO: CV Error vs Lambda")
+```
+
+## Log LASSO Selected Variables
+
+```{r model3-vars}
+lasso_log_coef <- coef(cv_lasso_log, s = "lambda.1se")
+lasso_log_vars <- rownames(lasso_log_coef)[which(lasso_log_coef != 0)]
+lasso_log_vars <- lasso_log_vars[lasso_log_vars != "(Intercept)"]
+cat("Log LASSO selected", length(lasso_log_vars), "variables:\n")
+print(lasso_log_vars)
+```
+
+## OLS with Log-LASSO Variables
+
+```{r model3-ols}
+train_in$logSalePrice <- log(train_in$SalePrice)
+
+formula_log <- as.formula(paste("logSalePrice ~", paste(lasso_log_vars, collapse = " + ")))
+model_log   <- lm(formula_log, data = train_in)
+```
+
+## Model 3 RMSE & Diagnostics
+
+Note: predictions are converted back to the original dollar scale via `exp()` before computing RMSE.
+
+```{r model3-rmse}
+pred_log <- exp(predict(model_log, newdata = test_out))
+rmse_log <- sqrt(mean((y_test - pred_log)^2))
+cat("Model 3 (Log + LASSO + OLS) RMSE:", round(rmse_log, 2), "\n")
+```
+
+```{r model3-stargazer, results='asis'}
+stargazer(model_log, type = "latex",
+          title = "Model 3: Log(SalePrice) + LASSO + OLS",
+          dep.var.labels = "Log(Sale Price)",
+          omit.stat = c("f", "ser"), digits = 4, no.space = TRUE,
+          header = FALSE)
+```
+
+```{r model3-plot}
+ggplot(data.frame(Actual = y_test, Predicted = pred_log),
+       aes(x = Actual, y = Predicted)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, color = "red",
+              linetype = "dashed", linewidth = 1) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Model 3 (Log + LASSO + OLS): Predicted vs Actual",
+       subtitle = paste0("RMSE = $", format(round(rmse_log, 0), big.mark = ",")),
+       x = "Actual Sale Price (USD)",
+       y = "Predicted Sale Price (USD)") +
+  theme_minimal(base_size = 13)
+```
+
+
+# Model 4: Log(SalePrice) + LASSO + Interaction Terms + OLS
+
+Following Wang (2025), who included interaction terms where appropriate, and Zietz et al. (2008), who demonstrated that housing characteristics have varying effects across price levels, we add interaction terms to capture multiplicative effects between key variables.
+
+## Verify Key Variables in LASSO Selection
+
+```{r model4-check}
+cat("OverallQual in selected?",      "OverallQual"      %in% lasso_log_vars, "\n")
+cat("GrLivArea in selected?",        "GrLivArea"        %in% lasso_log_vars, "\n")
+cat("AgeBuilt in selected?",         "AgeBuilt"         %in% lasso_log_vars, "\n")
+cat("Neighborhood_High in selected?", "Neighborhood_High" %in% lasso_log_vars, "\n")
+```
+
+## Interaction Terms
+
+We include three interaction terms based on economic reasoning:
+
+1. **OverallQual $\times$ GrLivArea**: High-quality large homes command a disproportionate premium --- the value of each additional square foot is greater in a well-built home.
+2. **OverallQual $\times$ AgeBuilt**: Higher quality construction retains value better over time, buffering the depreciation effect of age.
+3. **Neighborhood\_High $\times$ GrLivArea**: Each additional square foot is worth more in a premium neighborhood than in a lower-tier location.
+
+```{r model4-ols}
+interaction_terms <- c("OverallQual:GrLivArea",
+                       "OverallQual:AgeBuilt",
+                       "Neighborhood_High:GrLivArea")
+
+formula_interact <- as.formula(
+  paste("logSalePrice ~",
+        paste(lasso_log_vars, collapse = " + "),
+        "+",
+        paste(interaction_terms, collapse = " + "))
+)
+
+model_interact <- lm(formula_interact, data = train_in)
+```
+
+## Model 4 RMSE & Diagnostics
+
+```{r model4-rmse}
+pred_interact <- exp(predict(model_interact, newdata = test_out))
+rmse_interact <- sqrt(mean((y_test - pred_interact)^2))
+cat("Model 4 (Log + LASSO + Interaction + OLS) RMSE:", round(rmse_interact, 2), "\n")
+```
+
+```{r model4-stargazer, results='asis'}
+stargazer(model_interact, type = "latex",
+          title = "Model 4: Log + LASSO + Interaction + OLS",
+          dep.var.labels = "Log(Sale Price)",
+          omit.stat = c("f", "ser"), digits = 4, no.space = TRUE,
+          header = FALSE)
+```
+
+```{r model4-plot}
+ggplot(data.frame(Actual = y_test, Predicted = pred_interact),
+       aes(x = Actual, y = Predicted)) +
+  geom_point(alpha = 0.4, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, color = "red",
+              linetype = "dashed", linewidth = 1) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(title = "Model 4 (Log + LASSO + Interaction): Predicted vs Actual",
+       subtitle = paste0("RMSE = $", format(round(rmse_interact, 0), big.mark = ",")),
+       x = "Actual Sale Price (USD)",
+       y = "Predicted Sale Price (USD)") +
+  theme_minimal(base_size = 13)
+```
+
+
+# Model Comparison
+
+```{r comparison}
+results <- data.frame(
+  Model = c("Model 1: Benchmark (All Vars OLS)",
+            "Model 2: LASSO Selection + OLS",
+            "Model 3: Log + LASSO + OLS",
+            "Model 4: Log + LASSO + Interaction + OLS"),
+  Num_Vars = c(ncol(X_train),
+               length(lasso_vars),
+               length(lasso_log_vars),
+               length(lasso_log_vars) + length(interaction_terms)),
+  RMSE = c(rmse_benchmark,
+           rmse_lasso,
+           rmse_log,
+           rmse_interact)
+)
+
+results <- results %>% arrange(RMSE)
+print(results)
+```
+
+```{r comparison-plot}
+ggplot(results, aes(x = reorder(Model, RMSE), y = RMSE)) +
+  geom_col(fill = "steelblue", width = 0.6) +
+  geom_text(aes(label = paste0("$", format(round(RMSE, 0), big.mark = ","))),
+            hjust = -0.1, size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::comma,
+                     expand = expansion(mult = c(0, 0.2))) +
+  labs(title = "Model Comparison: Out-of-Sample RMSE",
+       x = NULL, y = "RMSE (USD)") +
+  theme_minimal(base_size = 13)
+```
